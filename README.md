@@ -6,7 +6,7 @@ A Python-based bot that uses the Alpaca API and swing trading principles to buy 
 ## How to Use
 1) First, you need an Alpaca Paper Trading account. You can sign up [here](https://app.alpaca.markets/signup)
 2) Click "generate new key" on your portfolio page to attain a key and secret key
-3) Put the keys into the 'config.py' file in this repository<br>
+3) Copy 'config.example.py' to 'config.py' and put your keys in the local 'config.py' file<br>
 > the main key is assigned to the APCA_API_KEY_ID variable while the secret key is assigned to APCA_API_SECRET_KEY
 4) Run 'biz_bot_final_script.py'
 
