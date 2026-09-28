@@ -1,11 +1,18 @@
 import biz_bot_scrape as bb1
 import pandas as pd
-import alpaca_trade_api as tradeapi
+from alpaca.common.exceptions import APIError
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest
 import config, time, math
 
 ##################################################-SETUP-##################################################
-api = tradeapi.REST(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, config.APCA_API_BASE_URL) # set URLs
-account = api.get_account() # get account info
+trading_client = TradingClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, paper=True)
+data_client = StockHistoricalDataClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY)
+account = trading_client.get_account() # get account info
 print('${} is available as buying power.'.format(account.buying_power)) # check buying power
 
 
@@ -18,8 +25,12 @@ buy_stocks_list = [] # final buy list
 for stock in buy_stocks:
     # we want to ensure we can afford each stock on our buy list
     # this loop filters out stocks we cannot afford by taking each element in buy_stocks, pulling its current price from the API, and adding it to our new list
-    barset = api.get_barset(stock, '1Min', limit=1)
-    stock_price = barset[stock][0].c #get current price of stock
+    bars = data_client.get_stock_bars(StockBarsRequest(
+        symbol_or_symbols=stock,
+        timeframe=TimeFrame.Minute,
+        limit=1
+    )).df
+    stock_price = bars.iloc[-1]['close'] #get current price of stock
     if stock_price < float(account.buying_power): # check if the stock's price is less than our buying power
         buy_stocks_list.append(stock)
 
@@ -28,8 +39,8 @@ for stock in buy_stocks:
 
 ##################################################-BUY STOCKS-##################################################
 while True: # will break when I don't want the bot to buy more stocks
-    account = api.get_account() # refresh account info
-    portfolio = api.list_positions()
+    account = trading_client.get_account() # refresh account info
+    portfolio = trading_client.get_all_positions()
     if buy_stocks_list: # check if there are stocks to buy
 
         for stock in buy_stocks_list:
@@ -38,8 +49,12 @@ while True: # will break when I don't want the bot to buy more stocks
             If one stock has a price of $1000 and one has a price of $100, for example, we don't want ten shares of each stock.
             We'd rather have one share of stock one and ten shares of stock two to ensure our portfolio is more diversified
             """
-            barset = api.get_barset(stock, '1Min', limit=1)
-            stock_price = barset[stock][0].c #get current price
+            bars = data_client.get_stock_bars(StockBarsRequest(
+                symbol_or_symbols=stock,
+                timeframe=TimeFrame.Minute,
+                limit=1
+            )).df
+            stock_price = bars.iloc[-1]['close'] #get current price
             equity_limit = 600 # maximum equity you want to own of each stock
             buy_qty = 0
 
@@ -55,15 +70,15 @@ while True: # will break when I don't want the bot to buy more stocks
 
             try:
                 # submit order for each stock in loop w/ our qty determined by our ratio calculator above
-                api.submit_order(
+                trading_client.submit_order(order_data=MarketOrderRequest(
                     symbol=stock,
                     qty=buy_qty,
-                    side='buy',
-                    type='market',
-                    time_in_force='gtc'
-                )
+                    side=OrderSide.BUY,
+                    type=OrderType.MARKET,
+                    time_in_force=TimeInForce.GTC
+                ))
                 print(f'{buy_qty} shares of {stock} will be bought')
-            except (tradeapi.rest.APIError):
+            except APIError:
                 print("Insufficient buying power for best available stocks")
                 break
 

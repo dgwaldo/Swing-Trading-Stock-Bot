@@ -1,15 +1,20 @@
 import biz_bot_scrape as bb1
 import pandas as pd
-import numpy as np
-import alpaca_trade_api as tradeapi
-import config, websocket, json, re, requests
-from urllib.error import HTTPError
-import btalib, ta
+from alpaca.common.exceptions import APIError
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest
+import config
+import ta
 from datetime import *
 
 ##################################################-SETUP-##################################################
-api = tradeapi.REST(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, config.APCA_API_BASE_URL)
-portfolio = api.list_positions() # get account info
+trading_client = TradingClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, paper=True)
+data_client = StockHistoricalDataClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY)
+portfolio = trading_client.get_all_positions() # get account info
 
 
 ##################################################-FIND CURRENT POSITIONS-##################################################
@@ -28,6 +33,10 @@ for stock in portfolio:
     equity_owned.append(portfolio[i].market_value)
     current_price.append(portfolio[i].current_price)
     i+=1
+
+if not current_holdings:
+    print('No open positions to sell')
+    raise SystemExit(0)
 
 # append each list to our dataframe
 current_holdings_df['symbol'] = current_holdings
@@ -49,9 +58,15 @@ symbols = [symbol.split(',')[0].strip() for symbol in symbols] # use this line f
 #symbols = [holding.split(',')[0].strip() for holding in holdings][1:] # use this line for Wilshire 5000
 symbols = ",".join(symbols)
 
-day_bars_url = '{}/day?symbols={}&limit=201'.format(config.BARS_URL, symbols) #get daily data every day for 200 days (for each symbol)
-r=requests.get(day_bars_url, headers=config.HEADERS) # use requests module to search each URL
-data = r.json() # gives us the data in a dictionary
+bars = data_client.get_stock_bars(StockBarsRequest(
+    symbol_or_symbols=symbols.split(','),
+    timeframe=TimeFrame.Day,
+    limit=201
+)).df
+if bars.empty:
+    bars = pd.DataFrame(columns=['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume'])
+else:
+    bars = bars.reset_index().sort_values(['symbol', 'timestamp'])
 
 
 ##################################################-SET UP DATA CONTAINERS-##################################################
@@ -67,18 +82,16 @@ symbol_list = []
 
 
 ##################################################-SCRAPE DATA-##################################################
-for symbol in data:
-    for bar in data[symbol]:
-        t = datetime.fromtimestamp(bar['t']) # change from UNIX timestamp to datetime object
-        day = t.strftime('%Y-%m-%d') # save to day variable
-        # append each variable to its own list, will add to df later
-        time_list.append(day)
-        open_list.append(bar['o'])
-        high_list.append(bar['h'])
-        low_list.append(bar['l'])
-        close_list.append(bar['c'])
-        volume_list.append(bar['v'])
-        symbol_list.append(symbol)
+for _, bar in bars.iterrows():
+    t = bar['timestamp'].to_pydatetime()
+    day = t.strftime('%Y-%m-%d')
+    time_list.append(day)
+    open_list.append(bar['open'])
+    high_list.append(bar['high'])
+    low_list.append(bar['low'])
+    close_list.append(bar['close'])
+    volume_list.append(bar['volume'])
+    symbol_list.append(bar['symbol'])
 # append each list to its own column in df
 df['symbol'] = symbol_list
 df['time'] = time_list
@@ -98,17 +111,12 @@ df['take_profit'] = ((df['r2'] - df['close'].shift(1))*.75) + df['close'].shift(
 
 
 ##################################################-ADDING IN INDICATORS-##################################################
-sma2 = btalib.sma(df, period=2)
-df['sma2']=sma2.df
-sma5 = btalib.sma(df, period=5)
-df['sma5']=sma5.df
-sma10 = btalib.sma(df, period=10)
-df['sma10']=sma10.df
-sma20 = btalib.sma(df, period=20)
-df['sma20']=sma20.df
-sma200 = btalib.sma(df, period=200)
-df['sma200']=sma200.df
-df['rsi'] = ta.momentum.rsi(df.close, n=6, fillna=False) # btalib rsi not working, we will use talib for this indicator
+df['sma2'] = ta.trend.sma_indicator(df['close'], window=2)
+df['sma5'] = ta.trend.sma_indicator(df['close'], window=5)
+df['sma10'] = ta.trend.sma_indicator(df['close'], window=10)
+df['sma20'] = ta.trend.sma_indicator(df['close'], window=20)
+df['sma200'] = ta.trend.sma_indicator(df['close'], window=200)
+df['rsi'] = ta.momentum.rsi(df['close'], window=6, fillna=False)
 
 
 ##################################################-JOIN THE TWO DATAFRAMES-##################################################
@@ -142,19 +150,20 @@ sell_df = df.loc[
 
 ##################################################-SELL STOCKS-##################################################
 if sell_df.empty == False: # if there are stocks to sell
-    portfolio = api.list_positions()
+    portfolio = trading_client.get_all_positions()
     print(f"stocks being sold: {list(sell_df['symbol'])}")
     i=0 # used for indexing
     for stock in sell_df['symbol']:
         try:
-            api.submit_order(
+            trading_client.submit_order(order_data=MarketOrderRequest(
                 symbol=sell_df['symbol'].iloc[i],
                 qty=sell_df['qty_owned'].iloc[i],
-                side='sell',
-                type='market',
-                time_in_force='gtc')
+                side=OrderSide.SELL,
+                type=OrderType.MARKET,
+                time_in_force=TimeInForce.GTC
+            ))
             print(f'{stock} sold')
             i+=1
-        except (requests.exceptions.HTTPError, tradeapi.rest.APIError):
+        except APIError:
             print(f"Either your order to sell {stock} hasn't been filled, or daytrade protection has been activated")
             continue

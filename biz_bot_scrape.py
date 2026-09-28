@@ -1,13 +1,15 @@
-import btalib, config, requests, json, time, ta
+import config, time, ta
 import pandas as pd
 from datetime import datetime, timedelta, date
-import warnings
-from pandas.core.common import SettingWithCopyWarning
-import alpaca_trade_api as tradeapi
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.client import TradingClient
 
 ##################################################-SETUP-##################################################
-api = tradeapi.REST(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, config.APCA_API_BASE_URL) # set URLs
-portfolio = api.list_positions()
+trading_client = TradingClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, paper=True)
+data_client = StockHistoricalDataClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY)
+portfolio = trading_client.get_all_positions()
 
 
 ##################################################-GET LIST OF SYMBOLS-##################################################
@@ -19,9 +21,15 @@ symbols = [holding.split(',')[2].strip() for holding in holdings][1:] # use this
 #symbols = [holding.split(',')[0].strip() for holding in holdings][1:] # use this line for Wilshire 5000
 symbols = ",".join(symbols)
 
-day_bars_url = '{}/day?symbols={}&limit=201'.format(config.BARS_URL, symbols) #get daily data every day for 200 days (for each symbol)
-r=requests.get(day_bars_url, headers=config.HEADERS) # use requests module to search each URL
-data = r.json() # gives us the data in a dictionary
+bars = data_client.get_stock_bars(StockBarsRequest(
+    symbol_or_symbols=symbols.split(','),
+    timeframe=TimeFrame.Day,
+    limit=201
+)).df
+if bars.empty:
+    bars = pd.DataFrame(columns=['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume'])
+else:
+    bars = bars.reset_index().sort_values(['symbol', 'timestamp'])
 
 
 ##################################################-SET UP DATA CONTAINERS-##################################################
@@ -37,18 +45,16 @@ symbol_list = []
 
 
 ##################################################-SCRAPE DATA-##################################################
-for symbol in data:
-    for bar in data[symbol]:
-        t = datetime.fromtimestamp(bar['t']) # change from UNIX timestamp to datetime object
-        day = t.strftime('%Y-%m-%d') # save to day variable
-        # append each variable to its own list, will add to df later
-        time_list.append(day)
-        open_list.append(bar['o'])
-        high_list.append(bar['h'])
-        low_list.append(bar['l'])
-        close_list.append(bar['c'])
-        volume_list.append(bar['v'])
-        symbol_list.append(symbol)
+for _, bar in bars.iterrows():
+    t = bar['timestamp'].to_pydatetime()
+    day = t.strftime('%Y-%m-%d')
+    time_list.append(day)
+    open_list.append(bar['open'])
+    high_list.append(bar['high'])
+    low_list.append(bar['low'])
+    close_list.append(bar['close'])
+    volume_list.append(bar['volume'])
+    symbol_list.append(bar['symbol'])
 # append each list to its own column in df
 df['symbol'] = symbol_list
 df['time'] = time_list
@@ -60,17 +66,12 @@ df['volume'] = volume_list
 
 
 ##################################################-ADDING IN INDICATORS-##################################################
-sma2 = btalib.sma(df, period=2)
-df['sma2']=sma2.df
-sma5 = btalib.sma(df, period=5)
-df['sma5']=sma5.df
-sma10 = btalib.sma(df, period=10)
-df['sma10']=sma10.df
-sma20 = btalib.sma(df, period=20)
-df['sma20']=sma20.df
-sma200 = btalib.sma(df, period=200)
-df['sma200']=sma200.df
-df['rsi'] = ta.momentum.rsi(df.close, n=6, fillna=False) # btalib rsi not working, we will use talib for this indicator
+df['sma2'] = ta.trend.sma_indicator(df['close'], window=2)
+df['sma5'] = ta.trend.sma_indicator(df['close'], window=5)
+df['sma10'] = ta.trend.sma_indicator(df['close'], window=10)
+df['sma20'] = ta.trend.sma_indicator(df['close'], window=20)
+df['sma200'] = ta.trend.sma_indicator(df['close'], window=200)
+df['rsi'] = ta.momentum.rsi(df['close'], window=6, fillna=False)
 
 
 ##################################################-CALCULATE PIVOT POINT AND RESISTANCE LEVEL-##################################################
@@ -175,11 +176,9 @@ today = today.strftime('%Y-%m-%d')
 big_money_df = df.loc[(df['time']==today) |
                       (df['time']==yesterday) |
                       (df['time']==two_days_ago) |
-                      (df['time']==three_days_ago)] # only take records from up to three days ago
+                      (df['time']==three_days_ago)].copy() # only take records from up to three days ago
 
 
-warnings.simplefilter(action="ignore", category=SettingWithCopyWarning)
-# warning being ignored - despite the error, I am still getting the expected result
 big_money_df.loc[:, 'above_sma10'] = (big_money_df['close'] > big_money_df['sma10']) # a simple column to detect if a stock is above or below the SMA 10-day line
 # setwithcopy warning - uncomment the following to ensure the code worked correctly
 # print((big_money_df['close'] > big_money_df['sma5']).sum())
@@ -244,13 +243,17 @@ again.
 
 ##################################################-REMOVE IF CURRENT PRICE < SMA10 -##################################################
 # construct that should avoid daytrades - may no longer be needed with sma10 if it works well enough (was meant to help sma5 issue)
-api = tradeapi.REST(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, config.APCA_API_BASE_URL) # set URLs
+data_client = StockHistoricalDataClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY)
 
 # WILL NOT WORK IF NON-TRADING DAY
 price_list = []
 for stock in stocks_to_buy:
-    barset = api.get_barset(stock, '1Min', limit=1)
-    stock_price = barset[stock][0].c #get current price
+    bars = data_client.get_stock_bars(StockBarsRequest(
+        symbol_or_symbols=stock,
+        timeframe=TimeFrame.Minute,
+        limit=1
+    )).df
+    stock_price = bars.iloc[-1]['close'] #get current price
     price_list.append(stock_price)
 buy_stocks['current_price'] = price_list
 

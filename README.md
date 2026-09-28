@@ -8,7 +8,12 @@ A Python-based bot that uses the Alpaca API and swing trading principles to buy 
 2) Click "generate new key" on your portfolio page to attain a key and secret key
 3) Copy 'config.example.py' to 'config.py' and put your keys in the local 'config.py' file<br>
 > the main key is assigned to the APCA_API_KEY_ID variable while the secret key is assigned to APCA_API_SECRET_KEY
-4) Run 'biz_bot_final_script.py'
+4) In PowerShell, create a Python 3.14 environment and install the dependencies:
+```powershell
+py -3.14 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+5) Run the bot from the repository folder with `\.venv\Scripts\python.exe biz_bot_final_script.py`. It continues until stopped with Ctrl+C and uses Alpaca paper trading.
 
 ## Tunable Parameters
 The indicators I use are based on my personal trading preferences. If you don't like them, that's okay! You can go in and change them however you'd like. Here's where you should look for things you might want to tune to your liking:
@@ -48,8 +53,8 @@ Each section has a commented header that describes what the code below it will d
 This will certainly be a long-term project for me as I look for ways to improve the bot and make it more efficient - if you have any ideas yourself, feel free to submit a pull request or email me at abzdel@bryant.edu. Thank you for your interest!
 
 ## Programs & Packages
-- **Python**: Version 3.7
-- **Packages**: pandas, btalib, talib, requests, json, tradeapi
+- **Python**: Version 3.14
+- **Packages**: alpaca-py, pandas, ta
 - **Alpaca**: For scraping stock data and buying/selling securities
 
 

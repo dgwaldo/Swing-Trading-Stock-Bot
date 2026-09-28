@@ -1,13 +1,15 @@
-import time, config
-import datetime, os
-import alpaca_trade_api as tradeapi
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-# run this file in the command line to have the bot automatically buy and sell stocks
-api = tradeapi.REST(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, config.APCA_API_BASE_URL) # setup
+script_dir = Path(__file__).resolve().parent
+venv_python = script_dir / '.venv' / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')
+python_executable = str(venv_python) if venv_python.is_file() else sys.executable
 
 while True: # continually run through buy and sell scripts
-        os.system('biz_bot_place_orders.py')
-        os.system('biz_bot_sell.py')
+        subprocess.run([python_executable, str(script_dir / 'biz_bot_place_orders.py')], cwd=script_dir, check=True)
+        subprocess.run([python_executable, str(script_dir / 'biz_bot_sell.py')], cwd=script_dir, check=True)
         #print('waiting two minutes')
         time.sleep(60)
         print("-"*50)
