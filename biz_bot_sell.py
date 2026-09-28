@@ -9,7 +9,6 @@ from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 import config
 import ta
-from datetime import *
 
 ##################################################-SETUP-##################################################
 trading_client = TradingClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, paper=True)
@@ -58,15 +57,14 @@ symbols = [symbol.split(',')[0].strip() for symbol in symbols] # use this line f
 #symbols = [holding.split(',')[0].strip() for holding in holdings][1:] # use this line for Wilshire 5000
 symbols = ",".join(symbols)
 
-bars = data_client.get_stock_bars(StockBarsRequest(
-    symbol_or_symbols=symbols.split(','),
-    timeframe=TimeFrame.Day,
-    limit=201
-)).df
+bars = bb1.fetch_daily_bars(data_client, symbols.split(','))
 if bars.empty:
-    bars = pd.DataFrame(columns=['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    raise RuntimeError('Alpaca returned no daily bars for open positions; check market-data access')
 else:
     bars = bars.reset_index().sort_values(['symbol', 'timestamp'])
+    missing_symbols = sorted(set(symbols.split(',')) - set(bars['symbol']))
+    if missing_symbols:
+        raise RuntimeError(f'Alpaca returned no daily bars for open positions: {", ".join(missing_symbols)}')
 
 
 ##################################################-SET UP DATA CONTAINERS-##################################################
@@ -103,25 +101,29 @@ df['volume'] = volume_list
 
 
 ##################################################-CALCULATE PIVOT POINT AND RESISTANCE LEVEL-##################################################
-df['pivot_point'] = (df['high'].shift(1) + df['low'].shift(1) + df['close'].shift(1))/3
-df['r1'] = (2*df['pivot_point']) - df['low'].shift(1)
-df['s1'] = (2*df['pivot_point']) - df['high'].shift(1)
+previous_bars = df.groupby('symbol', sort=False)[['high', 'low', 'close']].shift(1)
+df['pivot_point'] = (previous_bars['high'] + previous_bars['low'] + previous_bars['close'])/3
+df['r1'] = (2*df['pivot_point']) - previous_bars['low']
+df['s1'] = (2*df['pivot_point']) - previous_bars['high']
 df['r2'] = (df['pivot_point'] - df['s1']) + (df['r1'])
-df['take_profit'] = ((df['r2'] - df['close'].shift(1))*.75) + df['close'].shift(1)
+df['take_profit'] = ((df['r2'] - previous_bars['close'])*.75) + previous_bars['close']
 
 
 ##################################################-ADDING IN INDICATORS-##################################################
-df['sma2'] = ta.trend.sma_indicator(df['close'], window=2)
-df['sma5'] = ta.trend.sma_indicator(df['close'], window=5)
-df['sma10'] = ta.trend.sma_indicator(df['close'], window=10)
-df['sma20'] = ta.trend.sma_indicator(df['close'], window=20)
-df['sma200'] = ta.trend.sma_indicator(df['close'], window=200)
-df['rsi'] = ta.momentum.rsi(df['close'], window=6, fillna=False)
+for window in (2, 5, 10, 20, 200):
+    df[f'sma{window}'] = df.groupby('symbol', sort=False)['close'].transform(
+        lambda close: ta.trend.sma_indicator(close, window=window)
+    )
+df['rsi'] = df.groupby('symbol', sort=False)['close'].transform(
+    lambda close: ta.momentum.rsi(close, window=6, fillna=False)
+)
+df['previous_close'] = df.groupby('symbol', sort=False)['close'].shift(1)
+df['previous_sma10'] = df.groupby('symbol', sort=False)['sma10'].shift(1)
 
 
 ##################################################-JOIN THE TWO DATAFRAMES-##################################################
-today = str(date.today())
-df = df.loc[df['time']==today] # we only want today's records
+latest_times = df.groupby('symbol', sort=False)['time'].transform('max')
+df = df.loc[df['time'] == latest_times]
 
 df = df.merge(current_holdings_df, on='symbol', how='inner')
 
@@ -134,7 +136,7 @@ sell_df = df.loc[
 
                         ##########-CLOSE HOLDS BELOW SMA10 LINE-##########
                     |   (
-                        (df['close'].shift(1) < df['sma10'].shift(1)) & (df['close'] < df['sma10'])
+                        (df['previous_close'] < df['previous_sma10']) & (df['close'] < df['sma10'])
                         )
 
                         ##########-CURRENT PRICE REACHES RESISTANCE LEVEL 2-##########
@@ -152,18 +154,17 @@ sell_df = df.loc[
 if sell_df.empty == False: # if there are stocks to sell
     portfolio = trading_client.get_all_positions()
     print(f"stocks being sold: {list(sell_df['symbol'])}")
-    i=0 # used for indexing
-    for stock in sell_df['symbol']:
+    for _, position in sell_df.iterrows():
+        stock = position['symbol']
         try:
             trading_client.submit_order(order_data=MarketOrderRequest(
-                symbol=sell_df['symbol'].iloc[i],
-                qty=sell_df['qty_owned'].iloc[i],
+                symbol=stock,
+                qty=position['qty_owned'],
                 side=OrderSide.SELL,
                 type=OrderType.MARKET,
                 time_in_force=TimeInForce.GTC
             ))
             print(f'{stock} sold')
-            i+=1
         except APIError:
             print(f"Either your order to sell {stock} hasn't been filled, or daytrade protection has been activated")
             continue

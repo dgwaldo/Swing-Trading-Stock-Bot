@@ -1,6 +1,9 @@
 import biz_bot_scrape as bb1
 import pandas as pd
+from datetime import datetime, timedelta, timezone
+from alpaca.common.enums import Sort
 from alpaca.common.exceptions import APIError
+from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -8,6 +11,27 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 import config, time, math
+
+
+def get_latest_minute_price(data_client, symbol):
+    end = datetime.now(timezone.utc)
+    bars = data_client.get_stock_bars(StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=TimeFrame.Minute,
+        start=end - timedelta(days=7),
+        end=end,
+        limit=1,
+        feed=DataFeed.IEX,
+        sort=Sort.DESC
+    )).df
+    if bars.empty:
+        return None
+
+    stock_price = float(bars.iloc[-1]['close'])
+    if not math.isfinite(stock_price) or stock_price <= 0:
+        return None
+    return stock_price
+
 
 ##################################################-SETUP-##################################################
 trading_client = TradingClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, paper=True)
@@ -25,12 +49,10 @@ buy_stocks_list = [] # final buy list
 for stock in buy_stocks:
     # we want to ensure we can afford each stock on our buy list
     # this loop filters out stocks we cannot afford by taking each element in buy_stocks, pulling its current price from the API, and adding it to our new list
-    bars = data_client.get_stock_bars(StockBarsRequest(
-        symbol_or_symbols=stock,
-        timeframe=TimeFrame.Minute,
-        limit=1
-    )).df
-    stock_price = bars.iloc[-1]['close'] #get current price of stock
+    stock_price = get_latest_minute_price(data_client, stock)
+    if stock_price is None:
+        print(f'No valid recent minute bar for {stock}; skipping it')
+        continue
     if stock_price < float(account.buying_power): # check if the stock's price is less than our buying power
         buy_stocks_list.append(stock)
 
@@ -49,18 +71,20 @@ while True: # will break when I don't want the bot to buy more stocks
             If one stock has a price of $1000 and one has a price of $100, for example, we don't want ten shares of each stock.
             We'd rather have one share of stock one and ten shares of stock two to ensure our portfolio is more diversified
             """
-            bars = data_client.get_stock_bars(StockBarsRequest(
-                symbol_or_symbols=stock,
-                timeframe=TimeFrame.Minute,
-                limit=1
-            )).df
-            stock_price = bars.iloc[-1]['close'] #get current price
+            stock_price = get_latest_minute_price(data_client, stock)
+            if stock_price is None:
+                print(f'No valid recent minute bar for {stock}; skipping it')
+                continue
             equity_limit = 600 # maximum equity you want to own of each stock
             buy_qty = 0
 
             while equity_limit > stock_price:
                 buy_qty += 1 # increase buy quantity
                 equity_limit -= stock_price # decrease equity_limit variable by the stock price after each iteration
+
+            if buy_qty == 0:
+                print(f'{stock} is above the per-stock equity limit; skipping it')
+                continue
 
             # the following is currently not being used, but I will leave it here in case I want to use it again
             # if equity_limit < float(account.buying_power):

@@ -22,12 +22,10 @@ Each section has a commented header that describes what the code below it will d
 
 ### **biz_bot_scrape.py**<br>
 - GET LIST OF SYMBOLS
->  - Change 'holdings' variable to a different csv
->    - Note: you will likely have to split up the symbols differently in the following line
->  - Change 'limit' in the day_bars_url string to change the number of days you'd like to bring in
+>  - The scanner uses the newest dated snapshot in 'data/holdings.csv'. The current snapshot contains 101 [Nasdaq-100 constituents](https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies) as a QQQ universe proxy, dated 2026-09-19; refresh it when the index changes.
+>  - Daily bars use IEX data in batches of up to 40 symbols, with a 320-calendar-day window to cover the 200-day indicator.
 - ADDING IN INDICATORS
->  - Here, I use btalib and talib to calculate different SMA lines and RSI - any of these can be changed
->    - Refer to [btalib](https://btalib.backtrader.com/introduction/) and [talib](https://mrjbq7.github.io/ta-lib/doc_index.html) documentation pages for more info on how to do >this
+>  - SMA and RSI values are calculated independently for each ticker using the 'ta' package.
 - CALCULATE PIVOT POINT AND RESISTANCE LEVEL
 >  - You can add more resistance/support levels as you choose
 - FILTER DATA

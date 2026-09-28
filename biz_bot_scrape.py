@@ -1,10 +1,35 @@
 import config, time, ta
 import pandas as pd
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, timezone
+from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
+
+
+def fetch_daily_bars(data_client, symbols):
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=320)
+    batches = []
+
+    for offset in range(0, len(symbols), 40):
+        bars = data_client.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=symbols[offset:offset + 40],
+            timeframe=TimeFrame.Day,
+            start=start,
+            end=end,
+            limit=10000,
+            feed=DataFeed.IEX
+        )).df
+        if not bars.empty:
+            batches.append(bars.reset_index())
+
+    if not batches:
+        return pd.DataFrame(columns=['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+    return pd.concat(batches, ignore_index=True).sort_values(['symbol', 'timestamp'])
+
 
 ##################################################-SETUP-##################################################
 trading_client = TradingClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, paper=True)
@@ -13,23 +38,22 @@ portfolio = trading_client.get_all_positions()
 
 
 ##################################################-GET LIST OF SYMBOLS-##################################################
-holdings=open('data/holdings.csv').readlines() # read csv of QQQ holdings - should be able to use any csv
-#holdings=open('data/WILSHIRE-5000-Stock-Tickers-List.csv').readlines() # read csv of Wilshire 5000 - not using right now as I can only pass in 200 symbols
-
-# pull symbols from holdings csv, assigns it to symbols variable (list of symbols)
-symbols = [holding.split(',')[2].strip() for holding in holdings][1:] # use this line for QQQ holdings
-#symbols = [holding.split(',')[0].strip() for holding in holdings][1:] # use this line for Wilshire 5000
+holdings = pd.read_csv('data/holdings.csv', dtype={'Holding Ticker': 'string'})
+snapshot_dates = pd.to_datetime(holdings['Date'], format='mixed', errors='coerce')
+latest_snapshot = snapshot_dates.max()
+symbols = holdings.loc[snapshot_dates == latest_snapshot, 'Holding Ticker'].dropna().str.strip().tolist()
+if not symbols:
+    raise RuntimeError('No scanner symbols found in data/holdings.csv')
 symbols = ",".join(symbols)
 
-bars = data_client.get_stock_bars(StockBarsRequest(
-    symbol_or_symbols=symbols.split(','),
-    timeframe=TimeFrame.Day,
-    limit=201
-)).df
+bars = fetch_daily_bars(data_client, symbols.split(','))
 if bars.empty:
-    bars = pd.DataFrame(columns=['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    raise RuntimeError('Alpaca returned no daily bars; check market-data access and the scanner universe')
 else:
     bars = bars.reset_index().sort_values(['symbol', 'timestamp'])
+    missing_symbols = sorted(set(symbols.split(',')) - set(bars['symbol']))
+    if missing_symbols:
+        print(f'No daily bars returned for {len(missing_symbols)} scanner symbols: {", ".join(missing_symbols)}')
 
 
 ##################################################-SET UP DATA CONTAINERS-##################################################
@@ -66,120 +90,36 @@ df['volume'] = volume_list
 
 
 ##################################################-ADDING IN INDICATORS-##################################################
-df['sma2'] = ta.trend.sma_indicator(df['close'], window=2)
-df['sma5'] = ta.trend.sma_indicator(df['close'], window=5)
-df['sma10'] = ta.trend.sma_indicator(df['close'], window=10)
-df['sma20'] = ta.trend.sma_indicator(df['close'], window=20)
-df['sma200'] = ta.trend.sma_indicator(df['close'], window=200)
-df['rsi'] = ta.momentum.rsi(df['close'], window=6, fillna=False)
+for window in (2, 5, 10, 20, 200):
+    df[f'sma{window}'] = df.groupby('symbol', sort=False)['close'].transform(
+        lambda close: ta.trend.sma_indicator(close, window=window)
+    )
+df['rsi'] = df.groupby('symbol', sort=False)['close'].transform(
+    lambda close: ta.momentum.rsi(close, window=6, fillna=False)
+)
 
 
 ##################################################-CALCULATE PIVOT POINT AND RESISTANCE LEVEL-##################################################
-df['pivot_point'] = (df['high'].shift(1) + df['low'].shift(1) + df['close'].shift(1))/3
-df['r1'] = (2*df['pivot_point']) - df['low'].shift(1)
-df['s1'] = (2*df['pivot_point']) - df['high'].shift(1)
+previous_bars = df.groupby('symbol', sort=False)[['high', 'low', 'close']].shift(1)
+df['pivot_point'] = (previous_bars['high'] + previous_bars['low'] + previous_bars['close'])/3
+df['r1'] = (2*df['pivot_point']) - previous_bars['low']
+df['s1'] = (2*df['pivot_point']) - previous_bars['high']
 df['r2'] = (df['pivot_point'] - df['s1']) + (df['r1'])
-df['take_profit'] = ((df['r2'] - df['close'].shift(1))*.75) + df['close'].shift(1)
+df['take_profit'] = ((df['r2'] - previous_bars['close'])*.75) + previous_bars['close']
 
 # for now, we will just trade on these levels
 # if more are needed, they can be found and explained here:
 # https://www.daytrading.com/pivot-points#:~:text=Calculation%20of%20Pivot%20Points,-Pivots%20points%20can&text=The%20central%20price%20level%20%E2%80%93%20the,or%20period%2C%20more%20generally).&text=Resistance%201%20%3D%20(2%20x%20Pivot,)%20%E2%80%93%20High%20(previous%20period)
 
-##################################################-ADDING IN TIME-##################################################
-# add in time - make sure the bot is not trying to trade based on the price of non-trading days
-today = date.today()
-
-# conditions to use last trading days as variables
-if today.weekday() == 6: # sunday
-    yesterday = today - timedelta(days=2)
-    yesterday = yesterday.strftime('%Y-%m-%d')
-
-    two_days_ago = today - timedelta(days=3)
-    two_days_ago = two_days_ago.strftime('%Y-%m-%d')
-
-    three_days_ago = today - timedelta(days=4)
-    three_days_ago = three_days_ago.strftime('%Y-%m-%d')
-
-    four_days_ago = today - timedelta(days=5)
-    four_days_ago = four_days_ago.strftime('%Y-%m-%d')
-
-if today.weekday() == 0: # monday
-    yesterday = today - timedelta(days=3)
-    yesterday = yesterday.strftime('%Y-%m-%d')
-
-    two_days_ago = today -timedelta(days=4)
-    two_days_ago = two_days_ago.strftime('%Y-%m-%d')
-
-    three_days_ago = today - timedelta(days=5)
-    three_days_ago = three_days_ago.strftime('%Y-%m-%d')
-
-    four_days_ago = today - timedelta(days=6)
-    four_days_ago = four_days_ago.strftime('%Y-%m-%d')
-
-if today.weekday() == 1: # tuesday
-    yesterday = today - timedelta(days=1)
-    yesterday = yesterday.strftime('%Y-%m-%d')
-
-    two_days_ago = today - timedelta(days=4)
-    two_days_ago = two_days_ago.strftime('%Y-%m-%d')
-
-    three_days_ago = today - timedelta(days=5)
-    three_days_ago = three_days_ago.strftime('%Y-%m-%d')
-
-    four_days_ago = today - timedelta(days=6)
-    four_days_ago = four_days_ago.strftime('%Y-%m-%d')
-
-if today.weekday() == 2: # wednesday
-    yesterday = today - timedelta(days=1)
-    yesterday = yesterday.strftime('%Y-%m-%d')
-
-    two_days_ago = today - timedelta(days=2)
-    two_days_ago = two_days_ago.strftime('%Y-%m-%d')
-
-    three_days_ago = today - timedelta(days=5)
-    three_days_ago = three_days_ago.strftime('%Y-%m-%d')
-
-    four_days_ago = today - timedelta(days=6)
-    four_days_ago = four_days_ago.strftime('%Y-%m-%d')
-
-if today.weekday() == 3: # thursday
-    yesterday = today - timedelta(days=1)
-    yesterday = yesterday.strftime('%Y-%m-%d')
-
-    two_days_ago = today - timedelta(days=2)
-    two_days_ago = two_days_ago.strftime('%Y-%m-%d')
-
-    three_days_ago = today - timedelta(days=3)
-    three_days_ago = three_days_ago.strftime('%Y-%m-%d')
-
-    four_days_ago = today - timedelta(days=6)
-    four_days_ago = four_days_ago.strftime('%Y-%m-%d')
-
-if today.weekday() == 4 or today.weekday() == 5: # friday or saturday
-    yesterday = today - timedelta(days=1)
-    yesterday = yesterday.strftime('%Y-%m-%d')
-
-    two_days_ago = today - timedelta(days=2)
-    two_days_ago = two_days_ago.strftime('%Y-%m-%d')
-
-    three_days_ago = today - timedelta(days=3)
-    three_days_ago = three_days_ago.strftime('%Y-%m-%d')
-
-    four_days_ago = today - timedelta(days=4)
-    four_days_ago = four_days_ago.strftime('%Y-%m-%d')
-
-today = today.strftime('%Y-%m-%d')
-
-
 ##################################################-FILTER DATA-##################################################
-# first, let's only work with the last three days of data
-big_money_df = df.loc[(df['time']==today) |
-                      (df['time']==yesterday) |
-                      (df['time']==two_days_ago) |
-                      (df['time']==three_days_ago)].copy() # only take records from up to three days ago
+big_money_df = df.groupby('symbol', sort=False).tail(4).copy()
 
 
 big_money_df.loc[:, 'above_sma10'] = (big_money_df['close'] > big_money_df['sma10']) # a simple column to detect if a stock is above or below the SMA 10-day line
+big_money_df.loc[:, 'is_latest_bar'] = big_money_df['time'].eq(
+    big_money_df.groupby('symbol', sort=False)['time'].transform('max')
+)
+symbol_groups = big_money_df.groupby('symbol', sort=False)
 # setwithcopy warning - uncomment the following to ensure the code worked correctly
 # print((big_money_df['close'] > big_money_df['sma5']).sum())
 # print(big_money_df['above_sma5'].value_counts())
@@ -195,26 +135,26 @@ buy_stocks = big_money_df.loc[
                             # three days ago, the price action was below the SMA line
                             # two days ago and yesterday, the price action was above the SMA line
                             # we want to know if the price action has held above the SMA line for two days in a row after being below it
-                            & (big_money_df['above_sma10'].shift(3) == False) # below SMA 3 days ago
-                            & (big_money_df['above_sma10'].shift(2) == True) # above SMA 2 days ago
-                            & (big_money_df['above_sma10'].shift(1) == True) # above SMA yesterday
+                            & (symbol_groups['above_sma10'].shift(3) == False) # below SMA 3 days ago
+                            & (symbol_groups['above_sma10'].shift(2) == True) # above SMA 2 days ago
+                            & (symbol_groups['above_sma10'].shift(1) == True) # above SMA yesterday
                             & (big_money_df['above_sma10'] == True) # above SMA today
-                            & (big_money_df['close'].shift(1) > big_money_df['sma200'])
+                            & (symbol_groups['close'].shift(1) > big_money_df['sma200'])
 
 
                             ##########-CHECK IF SHORT TERM SMA > LONG TERM SMA FOR THREE DAYS-##########
                             & (big_money_df['sma10'] > big_money_df['sma200']) # today
-                            & (big_money_df['sma10'].shift(1) > big_money_df['sma200'].shift(1)) # yesterday
-                            & (big_money_df['sma10'].shift(2) > big_money_df['sma200'].shift(2)) # two days ago
+                            & (symbol_groups['sma10'].shift(1) > symbol_groups['sma200'].shift(1)) # yesterday
+                            & (symbol_groups['sma10'].shift(2) > symbol_groups['sma200'].shift(2)) # two days ago
 
 
                             ##########-ONLY RETURN RECORDS FROM TODAY-##########
-                            & (big_money_df['time']==today)
+                            & big_money_df['is_latest_bar']
 
                             ##########-CLOSE IS LESS THAN RESISTANCE LEVEL 2-##########
-                            & (big_money_df['close'].shift(1) <=big_money_df['r2'])
+                            & (symbol_groups['close'].shift(1) <= big_money_df['r2'])
 
-                            & (big_money_df['close'].shift(1) <= big_money_df['take_profit']) # CURRENT PRICE REACHES 75% OF RESISTANCE LEVEL 2 - NOT CURRENTLY USING
+                            & (symbol_groups['close'].shift(1) <= big_money_df['take_profit']) # CURRENT PRICE REACHES 75% OF RESISTANCE LEVEL 2 - NOT CURRENTLY USING
 
 
                                 ]
