@@ -9,6 +9,11 @@ from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 import config
 import ta
+import math
+
+TAKE_PROFIT_PERCENT = float(getattr(config, 'TAKE_PROFIT_PERCENT', 1.0))
+if not math.isfinite(TAKE_PROFIT_PERCENT) or TAKE_PROFIT_PERCENT <= 0:
+    raise ValueError('TAKE_PROFIT_PERCENT must be a finite positive percentage')
 
 ##################################################-SETUP-##################################################
 trading_client = TradingClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, paper=True)
@@ -23,6 +28,7 @@ current_holdings = []
 holding_qty = []
 equity_owned = []
 current_price = []
+avg_entry_price = []
 
 # loop used for getting data about currently owned stocks
 i=0 # used for indexing each item in our portfolio - will increase with each iteration of the loop
@@ -31,6 +37,7 @@ for stock in portfolio:
     holding_qty.append(portfolio[i].qty)
     equity_owned.append(portfolio[i].market_value)
     current_price.append(portfolio[i].current_price)
+    avg_entry_price.append(portfolio[i].avg_entry_price)
     i+=1
 
 if not current_holdings:
@@ -48,6 +55,9 @@ current_holdings_df['equity_owned'] = equity_owned
 
 current_price = [float(i) for i in current_price]
 current_holdings_df['current_price'] = current_price
+
+avg_entry_price = [float(i) for i in avg_entry_price]
+current_holdings_df['avg_entry_price'] = avg_entry_price
 
 
 ##################################################-SCRAPE DATA FOR CURRENT HOLDINGS-##################################################
@@ -100,15 +110,6 @@ df['close'] = close_list
 df['volume'] = volume_list
 
 
-##################################################-CALCULATE PIVOT POINT AND RESISTANCE LEVEL-##################################################
-previous_bars = df.groupby('symbol', sort=False)[['high', 'low', 'close']].shift(1)
-df['pivot_point'] = (previous_bars['high'] + previous_bars['low'] + previous_bars['close'])/3
-df['r1'] = (2*df['pivot_point']) - previous_bars['low']
-df['s1'] = (2*df['pivot_point']) - previous_bars['high']
-df['r2'] = (df['pivot_point'] - df['s1']) + (df['r1'])
-df['take_profit'] = ((df['r2'] - previous_bars['close'])*.75) + previous_bars['close']
-
-
 ##################################################-ADDING IN INDICATORS-##################################################
 for window in (2, 5, 10, 20, 200):
     df[f'sma{window}'] = df.groupby('symbol', sort=False)['close'].transform(
@@ -139,9 +140,8 @@ sell_df = df.loc[
                         (df['previous_close'] < df['previous_sma10']) & (df['close'] < df['sma10'])
                         )
 
-                        ##########-CURRENT PRICE REACHES RESISTANCE LEVEL 2-##########
-                    |   (df['current_price'] >= df['take_profit']) # CURRENT PRICE REACHES 75% OF RESISTANCE LEVEL 2 - NOT CURRENTLY USING
-                #    | (df['current_price'] >=df['r2'])
+                        ##########-CURRENT PRICE REACHES CONFIGURED PROFIT TARGET-##########
+                    |   (df['current_price'] >= df['avg_entry_price'] * (1 + TAKE_PROFIT_PERCENT / 100))
 
 
                         ##########-CLOSE DIPS BELOW LONG-TERM SMA-##########

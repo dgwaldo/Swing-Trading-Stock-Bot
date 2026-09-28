@@ -8,12 +8,15 @@ A Python-based bot that uses the Alpaca API and swing trading principles to buy 
 2) Click "generate new key" on your portfolio page to attain a key and secret key
 3) Copy 'config.example.py' to 'config.py' and put your keys in the local 'config.py' file<br>
 > the main key is assigned to the APCA_API_KEY_ID variable while the secret key is assigned to APCA_API_SECRET_KEY
+> Set MAX_CAPITAL to the maximum total position exposure the bot may allocate; the default is $500 and includes current positions and pending buy orders.
 4) In PowerShell, create a Python 3.14 environment and install the dependencies:
 ```powershell
 py -3.14 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 5) Run the bot from the repository folder with `\.venv\Scripts\python.exe biz_bot_final_script.py`. It continues until stopped with Ctrl+C and uses Alpaca paper trading.
+
+Buy quantities are sized from the latest IEX minute price and capped by both MAX_CAPITAL and Alpaca buying power. Market-order slippage can make actual fill values differ slightly from the estimate.
 
 ## Tunable Parameters
 The indicators I use are based on my personal trading preferences. If you don't like them, that's okay! You can go in and change them however you'd like. Here's where you should look for things you might want to tune to your liking:
@@ -39,9 +42,9 @@ Each section has a commented header that describes what the code below it will d
 - ADDING IN INDICATORS
 >  - Anything you change in the 'scrape' script will also have to be changed here
 - CALCULATE PIVOT POINT AND RESISTANCE LEVEL
->  - Anything you change in the 'scrape' script will also have to be changed here
+>  - The take-profit target is set by `TAKE_PROFIT_PERCENT` in this file; it defaults to 0.01 (1% above Alpaca's average entry price), before fees and slippage.
 - CRITERIA FOR SELLING
->  - Here's where you'd change the selling criteria
+>  - Set `TAKE_PROFIT_PERCENT` in local `config.py`; use `1.0` for a 1% gain or `1.5` for a 1.5% gain above average entry price. This gross target excludes fees and slippage.
   
 ## Ideas for future versions
   - Implement a machine learning algorithm to predict stock prices and trade on those predictions in conjunction with some techincal indicators

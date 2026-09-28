@@ -6,18 +6,38 @@ from alpaca.common.exceptions import APIError
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, OrderType, QueryOrderStatus, TimeInForce
+from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
 import config, time, math
+
+
+def get_buying_power(account):
+    if isinstance(account, dict):
+        return float(account.get('buying_power') or 0.0)
+    return float(account.buying_power or 0.0)
+
+
+def remaining_capital(capital_limit, positions, pending_buy_orders):
+    invested = sum(abs(float(position.market_value)) for position in positions)
+    reserved = 0.0
+    for order in pending_buy_orders:
+        if order.notional is not None:
+            reserved += float(order.notional)
+        elif order.limit_price is not None and order.qty is not None:
+            remaining_qty = max(float(order.qty) - float(order.filled_qty or 0), 0)
+            reserved += remaining_qty * float(order.limit_price)
+        else:
+            return 0.0
+    return max(capital_limit - invested - reserved, 0.0)
 
 
 def get_latest_minute_price(data_client, symbol):
     end = datetime.now(timezone.utc)
     bars = data_client.get_stock_bars(StockBarsRequest(
         symbol_or_symbols=symbol,
-        timeframe=TimeFrame.Minute,
+        timeframe=TimeFrame(1, TimeFrameUnit('Min')),
         start=end - timedelta(days=7),
         end=end,
         limit=1,
@@ -36,8 +56,12 @@ def get_latest_minute_price(data_client, symbol):
 ##################################################-SETUP-##################################################
 trading_client = TradingClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(config.APCA_API_KEY_ID, config.APCA_API_SECRET_KEY)
+capital_limit = float(getattr(config, 'MAX_CAPITAL', 500.0))
+if not math.isfinite(capital_limit) or capital_limit <= 0:
+    raise ValueError('MAX_CAPITAL must be a finite positive amount')
 account = trading_client.get_account() # get account info
-print('${} is available as buying power.'.format(account.buying_power)) # check buying power
+buying_power = get_buying_power(account)
+print('${} is available as buying power.'.format(buying_power)) # check buying power
 
 
 ##################################################-FINAL CRITERIA FOR BUYING-##################################################
@@ -53,7 +77,7 @@ for stock in buy_stocks:
     if stock_price is None:
         print(f'No valid recent minute bar for {stock}; skipping it')
         continue
-    if stock_price < float(account.buying_power): # check if the stock's price is less than our buying power
+    if stock_price < buying_power: # check if the stock's price is less than our buying power
         buy_stocks_list.append(stock)
 
 # might add current price scraper here if needed
@@ -62,8 +86,15 @@ for stock in buy_stocks:
 ##################################################-BUY STOCKS-##################################################
 while True: # will break when I don't want the bot to buy more stocks
     account = trading_client.get_account() # refresh account info
+    buying_power = get_buying_power(account)
     portfolio = trading_client.get_all_positions()
     if buy_stocks_list: # check if there are stocks to buy
+        pending_buy_orders = trading_client.get_orders(filter=GetOrdersRequest(
+            status=QueryOrderStatus.OPEN,
+            side=OrderSide.BUY,
+            limit=500
+        ))
+        capital_left = remaining_capital(capital_limit, portfolio, pending_buy_orders)
 
         for stock in buy_stocks_list:
             """
@@ -86,6 +117,12 @@ while True: # will break when I don't want the bot to buy more stocks
                 print(f'{stock} is above the per-stock equity limit; skipping it')
                 continue
 
+            affordable_qty = math.floor(min(capital_left, buying_power) / stock_price)
+            buy_qty = min(buy_qty, affordable_qty)
+            if buy_qty == 0:
+                print(f'{stock} would exceed the remaining ${capital_limit:.2f} allocation; skipping it')
+                continue
+
             # the following is currently not being used, but I will leave it here in case I want to use it again
             # if equity_limit < float(account.buying_power):
             #     buy_qty = math.floor(float(account.buying_power)/stock_price) # buy maximum number of stocks available with our buying power
@@ -102,6 +139,7 @@ while True: # will break when I don't want the bot to buy more stocks
                     time_in_force=TimeInForce.GTC
                 ))
                 print(f'{buy_qty} shares of {stock} will be bought')
+                capital_left -= buy_qty * stock_price
             except APIError:
                 print("Insufficient buying power for best available stocks")
                 break
